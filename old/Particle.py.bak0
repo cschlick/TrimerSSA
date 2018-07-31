@@ -1,0 +1,273 @@
+import numpy as np
+from Trimer import Trimer
+import random
+
+from Edge import Edge
+from Vertex import Vertex
+from Top import Top
+from Rejection import Rejection
+
+
+
+class Particle:
+    def __init__(self, seed_trimer, curvaturefunc, edge_length):
+        """
+        Particles mostly contain a set of trimers
+        """
+        self.trimers = set()
+        self.trimers.add(seed_trimer)
+
+        # integer accounting for pdb connect records
+        self.available_intids = [x for x in range(1, 9999)]  # set of possible ids
+        self.intid_dict = {}  # maps id(object) to intid
+
+        self.rejections = []  # list of rejection objects (hold reasons for rejection)
+
+        self.debug_verteces = set()
+        self.centroid = np.array([0, 0, 0])  # always has intid 0
+
+        self.curvature_history = []
+        self.edge_length = edge_length
+        self.stem_length = np.sqrt((self.edge_length ** 2) - ((self.edge_length / 2) ** 2))
+        self.curvaturefunc = curvaturefunc  # in radians of
+        self.clash_tolerance_top = 5
+
+    @property
+    def open_trimers(self):
+        return [trimer for trimer in self.trimers if trimer.full == False]
+
+    @property
+    def loose_trimers(self):  # trimers with a lone edge
+        return [trimer for trimer in self.trimers if len(trimer.open_edges) == 2]
+
+    @property
+    def open_edges(self):
+        return [edge for edge in self.edges if edge.full == False]
+
+    @property
+    def complete(self):
+        if self.num_open_edges == 0:
+            return True
+        else:
+            return False
+
+    @property
+    def num_open_edges(self):
+        num = 0
+
+        for edge in self.edges:
+            if edge.full == False:
+                num += 1
+        return num
+
+    @property
+    def edges(self):
+        myedges = set()
+        for trimer in self.trimers:
+            myedges = myedges | trimer.edges
+        return myedges
+
+    @property
+    def verteces(self):
+        verteces = set()
+        for trimer in self.trimers:
+            verteces = verteces | trimer.verteces
+        return verteces
+
+    @property
+    def tops(self):
+        tops = set()
+        for trimer in self.trimers:
+            tops = tops | trimer.tops
+        return tops
+
+    @property
+    def objects(self):  # verteces and edges for now
+        return self.edges | self.verteces | self.debug_verteces
+
+    def intid_update(self):
+
+        for object in self.objects:
+            if id(object) not in self.intid_dict.keys():
+                intid = random.choice(self.available_intids)
+                self.intid_dict[id(object)] = intid
+                self.available_intids.remove(intid)
+
+    def add(self):
+        rejection = None
+        closing_hole_flag = False
+        if self.num_open_edges == 0:
+            print("Complete particle...")
+        else:
+            curvature = self.curvaturefunc()
+
+            # get a random trimer to add to
+            adding_trimer = random.choice(self.open_trimers)
+            # ask the trimer for a candidate trimer
+
+            #candidate_new_vertex_coord, adding_edge, mytop, mybottom = trimer.add(self, curvature)
+            candate_trimer = adding_trimer.add(self,curvature)
+
+
+
+
+            # check dists
+            merge_tolerance = 0.75 * self.edge_length / 10  # pct
+            clash_tolerance_vertex = 6 * self.edge_length / 10  # vertex-vertex separation
+            clash_tolerance_edge = 6 * self.edge_length / 10  # vertex-edge separation
+
+            merging_vertex = None
+            for vertex in self.verteces:
+                dist = np.linalg.norm(vertex.coord - candidate_new_vertex_coord)
+                if dist <= merge_tolerance:
+                    merging_vertex = vertex
+                    # merging_vertex.coord = (candidate_new_vertex_coord+merging_vertex.coord)/2
+                    break
+                if dist <= clash_tolerance_vertex:
+                    # print("vertex clash")
+                    rejection = Rejection("vertex clash")
+                    # self.debug_verteces.add(Vertex(candidate_new_vertex_coord))
+                    break
+
+            adjacent_tops = set()
+            adjacent_verteces = set()
+            for t1 in trimer.adjacent_trimers:
+                for top in t1.tops:
+                    adjacent_tops.add(top)
+                for vertex in t1.verteces:
+                    adjacent_verteces.add(vertex)
+                for t2 in t1.adjacent_trimers:
+                    for top in t2.tops:
+                        adjacent_tops.add(top)
+                    for vertex in t2.verteces:
+                        adjacent_verteces.add(vertex)
+                    for t3 in t2.adjacent_trimers:
+                        for top in t3.tops:
+                            adjacent_tops.add(top)
+                        for vertex in t3.verteces:
+                            adjacent_verteces.add(vertex)
+
+            topchecks = self.tops - adjacent_tops
+            topchecks = topchecks | self.verteces | adjacent_verteces
+
+            for top in topchecks:
+                dist1 = np.linalg.norm(top.coord - mytop.coord)
+                dist2 = np.linalg.norm(top.coord - mybottom.coord)
+
+                if (dist1 <= self.clash_tolerance_top) or (dist2 <= self.clash_tolerance_top):
+                    rejection = Rejection("top clash, distance " + str(dist1) + ", " + str(dist2))
+                    self.rejections.append(rejection)
+                    break
+
+            if (merging_vertex == False) and (rejection == None):
+                for edge in self.edges:
+                    dist = np.linalg.norm(edge.coord - candidate_new_vertex_coord)
+                    if dist <= clash_tolerance_edge:
+                        rejection = Rejection("edge clash")
+                        break
+
+            if (merging_vertex != None) and (rejection == None):  # merging
+                # print("merging")
+
+                # find hinge vertex...
+
+                hinge_vertex_options_set = adding_edge.verteces.intersection(merging_vertex.secondary_verteces)
+
+                if len(hinge_vertex_options_set) == 0:
+                    # print("probably a tip-tip merge, rejecting...")
+                    rejection = Rejection("tip tip merge")
+                else:
+                    try:
+                        assert (len(hinge_vertex_options_set) == 1)
+                    except AssertionError:
+                        print("We think we are closing a hole")
+                        closing_hole_flag = True
+
+                if rejection == None:
+                    if closing_hole_flag == True:
+                        verteces = list(hinge_vertex_options_set)
+                        hinge_vertex = verteces[0]
+                        closing_hole_vertex = verteces[1]
+                    else:
+                        hinge_vertex = next(iter(hinge_vertex_options_set))
+
+                    merging_edge_options_set = set()
+                    for edge in hinge_vertex.edges:
+                        if merging_vertex in edge.verteces:
+                            merging_edge_options_set.add(edge)
+                    try:
+                        assert (len(merging_edge_options_set) == 1)
+                    except:
+                        print("Error merging.... maybe full?")
+                        rejection = Rejection("error merging....")
+
+                    if (rejection == None) and (closing_hole_flag == False):
+                        merging_edge = next(iter(merging_edge_options_set))
+
+                        new_edge_vertex_set = adding_edge.verteces - set([hinge_vertex])
+                        assert (len(new_edge_vertex_set) == 1)
+                        new_edge_vertex = next(iter(new_edge_vertex_set))
+
+                        new_edge = Edge([new_edge_vertex, merging_vertex])
+
+                        new_trimer = Trimer([adding_edge, merging_edge, new_edge], [mytop, mybottom])
+                        adding_edge.full = True
+                        merging_edge.full = True
+
+                    elif closing_hole_flag == True:
+                        merging_edge = next(iter(merging_edge_options_set))
+
+                        new_edge_vertex_set = adding_edge.verteces - set([hinge_vertex])
+                        assert (len(new_edge_vertex_set) == 1)
+                        new_edge_vertex = next(iter(new_edge_vertex_set))
+
+                        # get the edge to mark as full
+
+                        possibles = [edge for edge in merging_vertex.edges if closing_hole_vertex in edge.verteces]
+                        assert (len(possibles) == 1)
+                        final_edge = possibles[0]
+
+                        new_trimer = Trimer([adding_edge, merging_edge, final_edge], [mytop, mybottom])
+                        adding_edge.full = True
+                        merging_edge.full = True
+                        final_edge.full = True
+
+            elif rejection == None:  # not merging
+                # print("creating totally fresh")
+                new_vertex = Vertex(candidate_new_vertex_coord)
+                new_edge1 = Edge([adding_edge.vertex1, new_vertex])
+                new_edge2 = Edge([adding_edge.vertex2, new_vertex])
+                new_trimer = Trimer([adding_edge, new_edge1, new_edge2], [mytop, mybottom])
+                adding_edge.full = True
+
+            if rejection != None:
+                self.rejections.append(rejection)
+            else:
+                self.trimers.add(new_trimer)
+                # if successful, record the curvature
+                self.curvature_history.append(curvature)
+
+    def remove(self):
+        if len(self.loose_trimers) > 3:
+
+            trimer = random.choice(self.loose_trimers)
+            trimer.delete()
+            self.trimers.remove(trimer)
+
+            # check for discontinuity
+            remove_set = set()
+            for trimer in self.trimers:
+                if len(trimer.open_edges) == 3:
+                    remove_set.add(trimer)
+            for trimer in remove_set:
+                self.trimers.remove(trimer)
+
+    def summarize(self):
+        print("Particle Summary:")
+        print("\tTrimers: ", len(self.trimers))
+        print("\tEdges: ", len(self.edges))
+        print("\tVerteces: ", len(self.verteces))
+        print("\tDebug Verteces: ", len(self.debug_verteces))
+        print("\tOpen trimers: ", len(self.open_trimers))
+        print("\tOpen edges: ", len(self.open_edges))
+        print("\tRejections: ", len(self.rejections))

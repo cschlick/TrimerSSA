@@ -1,0 +1,470 @@
+import numpy as np
+from Trimer import Trimer
+import random
+
+from Edge import Edge
+from Vertex import Vertex
+from Writer import Writer
+from Top import Top
+from Rejection import Rejection
+from lib import assertlength
+from transformations import unit_vector
+
+class Particle:
+    def __init__(self, seed_trimer,reference_edge_length,trimer_generator):
+        """
+        Particles mostly contain a set of trimers
+        """
+        self.trimers = set()
+        self.trimers.add(seed_trimer)
+
+        # integer accounting for pdb connect records
+        self.available_intids = [x for x in range(1, 9999)]  # set of possible ids
+        self.intid_dict = {}  # maps id(object) to intid
+
+        self.rejections = []  # list of rejection objects (hold reasons for rejection)
+
+        self.debug_verteces = set()
+        self.centroid = np.array([0, 0, 0])  # always has intid 0
+
+        self.curvature_history = []
+        # self.stem_length = np.sqrt((self.edge_length ** 2) - ((self.edge_length / 2) ** 2))
+        # self.curvaturefunc = curvaturefunc  # in radians of
+        self.reference_edge_length = reference_edge_length # used to scale cutoffs
+        self.clash_tolerance_top_top = 100#self.reference_edge_length*2
+        self.clash_tolerance_top_vertex = self.reference_edge_length*0.5
+        self.clash_tolerance_vertex = self.reference_edge_length*0.6
+        self.merge_tolerance = 5
+        print("reference edge length: ",self.reference_edge_length)
+        print("clash tolerance top-top",self.clash_tolerance_top_top)
+        print("clash tolerance top-vertex",self.clash_tolerance_top_vertex)
+        print("clash tolerance vertex-vertex",self.clash_tolerance_vertex)
+        print("merge tolerance:",self.merge_tolerance)
+        self.history = []
+
+        self.trimer_generator = trimer_generator
+        self.__timestep = 1
+        self.add_events = 1
+        self.remove_events=0
+
+
+
+
+    @property
+    def timestep(self):
+        return self.__timestep
+
+
+    @property
+    def open_trimers(self):
+        return [trimer for trimer in self.trimers if trimer.full == False]
+
+    @property
+    def single_bond_trimers(self):  # trimers with one open edges
+        return [trimer for trimer in self.trimers if len(trimer.open_edges) == 2]
+    @property
+    def double_bond_trimers(self): # trimers with two open edges
+        return [trimer for trimer in self.trimers if len(trimer.open_edges) == 1]
+
+    @property
+    def open_edges(self):
+        return [edge for edge in self.edges if edge.full == False]
+
+    @property
+    def complete(self):
+        if self.num_open_edges == 0:
+            return True
+        else:
+            return False
+
+    @property
+    def num_open_edges(self):
+        num = 0
+
+        for edge in self.edges:
+            if edge.full == False:
+                num += 1
+        return num
+
+    @property
+    def edges(self):
+        myedges = set()
+
+
+        for trimer in self.trimers:
+            myedges = myedges | trimer.edges
+        return myedges
+
+    @property
+    def verteces(self):
+        verteces = set()
+        for trimer in self.trimers:
+            verteces = verteces | trimer.verteces
+        return verteces
+
+    @property
+    def tops(self):
+        tops = set()
+        for trimer in self.trimers:
+            tops = tops | trimer.tops
+        return tops
+
+    @property
+    def objects(self):  # verteces and edges for now
+        return self.edges | self.verteces | self.debug_verteces
+
+
+    def increment_timestep(self):
+        self.history.append(len(self.trimers))
+        self.__timestep+=1
+
+
+
+    def intid_update(self):
+
+        for object in self.objects:
+            if id(object) not in self.intid_dict.keys():
+                intid = random.choice(self.available_intids)
+                self.intid_dict[id(object)] = intid
+                self.available_intids.remove(intid)
+
+    def check_clash_between_two_objects(self,checkobj,obj,adding_edge,tolerance):
+        dist = np.linalg.norm(obj.coord - checkobj.coord)
+        exclude = set()
+
+        if type(checkobj) is Vertex:
+            dist = np.linalg.norm(obj.coord-checkobj.coord)
+        elif type(checkobj) is Edge:
+            dist = np.linalg.norm(obj.coord - checkobj.coord)
+        elif type(checkobj) is Top:
+            exclude_trimers = set()
+            exclude_trimers.add(next(iter(adding_edge.trimers)))
+
+            exclude_verteces = set()
+            for v1 in adding_edge.verteces:
+                for v2 in v1.secondary_verteces:
+                    for v3 in v2.secondary_verteces:
+                        exclude_verteces.add(v3)
+                    exclude_verteces.add(v2)
+                exclude_verteces.add(v1)
+
+            for v in exclude_verteces:
+                for trimer in v.trimers:
+                    exclude_trimers.add(trimer)
+
+            for trimer in exclude_trimers:
+                for top in trimer.tops:
+                    exclude.add(top)
+
+        if (dist <= tolerance) and (obj not in exclude):
+            return True
+        else:
+            return False
+
+    def check_clash_tops(self,adding_edge,candidate_vertex):
+
+        # make tops
+        (v1,v2) = adding_edge.verteces
+        v3 = candidate_vertex
+        n1 = v2.coord - v1.coord
+        n2 = v3.coord - v1.coord
+        vec = np.cross(n1, n2)
+        d = self.reference_edge_length * 0.3
+        center = (adding_edge.coord+candidate_vertex.coord)/2
+        top1 = Top(center + d * unit_vector(vec))
+        top2 = Top(center - d * unit_vector(vec))
+        top1.trimer = next(iter(adding_edge.trimers))
+        top2.trimer = top1.trimer
+        tops = set([top1, top2])
+
+        # check for clashes
+        top_clash_flag = False
+        rejection = None
+        for trimer in self.trimers:
+            if top_clash_flag is False:
+
+                (v1,v2,v3) = trimer.verteces
+                (t1,t2) = trimer.tops
+                results = [] # a list of True false, if any are True, there was a clash
+                toltt = self.clash_tolerance_top_top
+                toltv = self.clash_tolerance_top_vertex
+                results.append(self.check_clash_between_two_objects(top1,v1,adding_edge,toltv))
+                results.append(self.check_clash_between_two_objects(top1, v2, adding_edge,toltv))
+                results.append(self.check_clash_between_two_objects(top1, v3, adding_edge,toltv))
+                results.append(self.check_clash_between_two_objects(top1, t1, adding_edge,toltt))
+                results.append(self.check_clash_between_two_objects(top1, t2, adding_edge,toltt))
+
+                results.append(self.check_clash_between_two_objects(top2, v1, adding_edge,toltv))
+                results.append(self.check_clash_between_two_objects(top2, v2, adding_edge,toltv))
+                results.append(self.check_clash_between_two_objects(top2, v3, adding_edge,toltv))
+                results.append(self.check_clash_between_two_objects(top2, t1, adding_edge,toltt))
+                results.append(self.check_clash_between_two_objects(top2, t2, adding_edge,toltt))
+
+                if any(results):
+                    top_clash_flag = True
+                    rejection = Rejection("top clash")
+
+        return top_clash_flag, tops, rejection
+
+
+
+    def check_clash_vertex(self,candidate_vertex,adding_edge): # return Bool,Bool,object for Clash, Merge, Merge Vertex
+        rejection = None
+        clash_flag = False
+        merge_flag = False
+        merging_vertex = None
+
+        for trimer in self.trimers:
+
+            (e1,e2,e3) = trimer.edges
+            (v1,v2,v3) = trimer.verteces
+            #dist1 = np.linalg.norm(trimer.coord - candidate_vertex.coord)
+            # dist2 = np.linalg.norm(e1.coord - candidate_vertex.coord)
+            # dist3 = np.linalg.norm(e2.coord - candidate_vertex.coord)
+            # dist4 = np.linalg.norm(e3.coord - candidate_vertex.coord)
+            dist5 = np.linalg.norm(v1.coord - candidate_vertex.coord)
+            dist6 = np.linalg.norm(v2.coord - candidate_vertex.coord)
+            dist7 = np.linalg.norm(v3.coord - candidate_vertex.coord)
+            tolv = self.clash_tolerance_vertex
+            tolm = self.merge_tolerance
+            # check for clashes
+            # if (dist1 <= tol):
+            #     rejection = Rejection("vertex clash with trimer center")
+            #     clash_flag = True
+            # if (dist2 <= tol) and (e1 not in disallowed_edges):
+            #     rejection = Rejection("vertex clash with edge")
+            #     clash_flag = True
+            # elif (dist3 <= tol) and (e2 not in disallowed_edges):
+            #     rejection = Rejection("vertex clash with edge")
+            #     clash_flag = True
+            # elif (dist4 <= tol) and (e3 not in disallowed_edges):
+            #     rejection = Rejection("vertex clash with edge")
+            #     clash_flag = True
+            if (tolm < dist5 <= tolv):
+                rejection = Rejection("vertex clash with vertex, dist:"+str(dist5))
+                clash_flag = True
+            elif (tolm < dist6 <= tolv):
+                rejection = Rejection("vertex clash with vertex, dist:"+str(dist6))
+                clash_flag = True
+            elif (tolm < dist7 <= tolv):
+                rejection = Rejection("vertex clash with vertex, dist:"+str(dist7))
+                clash_flag = True
+
+
+            if (dist5 <= tolm) and (clash_flag == False): # check for merges
+                merging_vertex = v1
+                merge_flag = True
+            elif  (dist6 <= tolm)and (clash_flag == False):
+                merging_vertex = v2
+                merge_flag = True
+            elif (dist7 <= tolm)and (clash_flag == False):
+                merging_vertex = v3
+                merge_flag = True
+
+
+        return clash_flag,merge_flag,merging_vertex,rejection
+
+    def merge(self,adding_edge,merging_vertex):
+
+            # dbgv = Vertex(merging_vertex.coord)
+            # self.debug_verteces.add(dbgv)
+            # print("merging_vertex edges: ", len(merging_vertex.edges))
+            # print("merging_vertex secondary verteces: ", len(merging_vertex.secondary_verteces))
+
+            # find hinge vertex...
+            hinge_vertex_options_set = adding_edge.verteces.intersection(merging_vertex.secondary_verteces)
+
+
+
+            if len(hinge_vertex_options_set) == 0:
+                #print("probably a tip-tip merge, rejecting...")
+
+                return Rejection("tip tip merge")
+
+            elif len(hinge_vertex_options_set) > 1: # probably closing a hole. Need to merge two edges
+                    #print("merging two edges, probably closing hole.")
+
+                    verteces = list(hinge_vertex_options_set)
+                    hinge_vertex = verteces[0]
+                    hinge_opposite_vertex = verteces[1]
+                    merging_edge_options_set = set()
+                    for edge in hinge_vertex.edges:
+                        if merging_vertex in edge.verteces:
+                            merging_edge_options_set.add(edge)
+
+                    assertlength(merging_edge_options_set, 1)
+
+                    merging_edge = next(iter(merging_edge_options_set))
+                    new_trimer = self.add_type_merge_two_edge(adding_edge,
+                                                              merging_edge,
+                                                              merging_vertex,
+                                                              hinge_vertex,
+                                                              hinge_opposite_vertex)
+                    return new_trimer
+
+            elif len(hinge_vertex_options_set) == 1: # probably adding with a single edge merge
+                #print("Adding with single edge merge")
+                hinge_vertex = next(iter(hinge_vertex_options_set))
+                merging_edge_options_set = set()
+                for edge in hinge_vertex.edges:
+                    if merging_vertex in edge.verteces:
+                        merging_edge_options_set.add(edge)
+
+                assertlength(merging_edge_options_set, 1)
+                merging_edge = next(iter(merging_edge_options_set))
+
+                hinge_opposite_vertex_options_set = adding_edge.verteces - set([hinge_vertex])
+                hinge_opposite_vertex = next(iter(hinge_opposite_vertex_options_set))
+
+
+                new_trimer = self.add_type_merge_one_edge(adding_edge,
+                                                          merging_edge,
+                                                          merging_vertex,
+                                                          hinge_vertex,
+                                                          hinge_opposite_vertex)
+                return new_trimer
+            else:
+                print("Error: Unhandled number of hinge verteces")
+
+                return Rejection("Error: Unhandled number of hinge verteces")
+
+    def add_type_merge_one_edge(self,
+                                adding_edge,
+                                merging_edge,
+                                merging_vertex,
+                                hinge_vertex,
+                                hinge_opposite_vertex):
+
+
+
+        new_edge = Edge([hinge_opposite_vertex, merging_vertex])
+        #print(adding_edge, merging_edge, new_edge)
+        new_trimer = Trimer([adding_edge, merging_edge, new_edge])
+        adding_edge.full = True
+        merging_edge.full = True
+        return new_trimer
+
+
+    def add_type_merge_two_edge(self,adding_edge,merging_edge,merging_vertex,hinge_vertex,hinge_opposite_vertex):
+
+        new_edge_vertex_set = adding_edge.verteces - set([hinge_vertex])
+        assert (len(new_edge_vertex_set) == 1)
+        new_edge_vertex = next(iter(new_edge_vertex_set))
+
+
+        possible_final_edges = [edge for edge in merging_vertex.edges if hinge_opposite_vertex in edge.verteces]
+        assert (len(possible_final_edges) == 1)
+        final_edge = possible_final_edges[0]
+
+        new_trimer = Trimer([adding_edge, merging_edge, final_edge])
+        adding_edge.full = True
+        merging_edge.full = True
+        final_edge.full = True
+        return new_trimer
+
+
+    def add(self,specific_edge=False,trimer_type_request=None):
+
+        self.add_events+=1
+        rejection = None
+
+
+
+
+
+        # get a random trimer to add to
+        if specific_edge is False:
+            adding_trimer = random.choice(self.open_trimers)
+            adding_edge = random.choice(adding_trimer.open_edges)
+        elif type(specific_edge) is Edge:
+            assert(len(specific_edge.trimers)==1)
+            (adding_trimer,) = specific_edge.trimers
+            adding_edge = specific_edge
+        else:
+            print("Error with add( , specify_edge=")
+
+
+        # ask the trimer for a candidate trimer
+
+        template = self.trimer_generator.choose(trimer_type_request=trimer_type_request)
+
+        #new_vertex = adding_trimer.add3(self,template,adding_edge=adding_edge)
+        new_vertex = adding_trimer.add(self, template, adding_edge=adding_edge)
+
+        if new_vertex is not False: # if false, ther ewas error in trilateration
+
+            # check for clashes or merges, possibly get the merging vertex
+
+            clash_flag, merge_flag, merging_vertex, rejection = self.check_clash_vertex(new_vertex,adding_edge)
+        else:
+            clash_flag =True
+            merge_flag = False
+            rejection = Rejection("Trilateration error")
+
+        # check for clashes with tops
+        if clash_flag is False:
+            clash_flag, tops, rejection = self.check_clash_tops(adding_edge,new_vertex)
+
+
+        if (merge_flag == False) and (clash_flag == False): # adding without merge
+
+            #print("Adding without merge")
+            adding_edge_verteces = list(adding_edge.verteces)
+            new_edge1 = Edge([adding_edge_verteces[0],new_vertex])
+            new_edge2 = Edge([new_vertex,adding_edge_verteces[1]])
+            new_trimer = Trimer([adding_edge,new_edge1,new_edge2])
+
+            self.trimers.add(new_trimer)
+            adding_edge.full = True
+
+
+        elif (merge_flag == True) and (clash_flag == False):  # adding with merge
+            # check for self merge
+            assert (len(adding_edge.trimers) == 1)
+            adding_trimer = next(iter(adding_edge.trimers))
+
+
+            if merging_vertex not in adding_trimer.verteces:
+                new_trimer = self.merge(adding_edge,merging_vertex)
+                if type(new_trimer) is Rejection:
+                    rejection = new_trimer
+                elif type(new_trimer) is Trimer:
+                    self.trimers.add(new_trimer)
+            else:
+                rejection = Rejection("self clash")
+
+        elif (clash_flag == True):
+            # the timestep resulted in rejection
+            self.rejections.append(rejection)
+
+        else:
+            print("big problem..."," Merge flag:",merge_flag," Clash flag:",clash_flag)
+
+
+    def remove(self,trimer):
+        self.remove_events +=1
+        self.trimers.remove(trimer)
+        trimer.delete()
+
+
+        # check for single subunit discontinuity
+        if len(self.trimers) > len(self.open_trimers):
+            remove_set = set()
+            for trimer in self.trimers:
+                if len(trimer.open_edges) == 3:
+                    remove_set.add(trimer)
+            for trimer in remove_set:
+                self.trimers.remove(trimer)
+
+    def summarize(self):
+        print("Particle Summary:")
+        print("\tTimesteps: ",self.timestep)
+        print("\tAdd events: ",self.add_events)
+        print("\tRemove events:",self.remove_events)
+        print("\tTrimers: ", len(self.trimers))
+        print("\tEdges: ", len(self.edges))
+        print("\tVerteces: ", len(self.verteces))
+        print("\tDebug Verteces: ", len(self.debug_verteces))
+        print("\tOpen trimers: ", len(self.open_trimers))
+        print("\tOpen edges: ", len(self.open_edges))
+        print("\tRejections: ", len(self.rejections))
