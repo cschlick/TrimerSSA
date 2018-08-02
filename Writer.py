@@ -1,5 +1,6 @@
 import sys
 import os
+import hashlib
 # Edit this path to the location of the PDBModule folder on your computer
 sys.path.append("../PDBModule")
 
@@ -10,12 +11,20 @@ from pathlib import Path
 
 
 class Writer:
-    def __init__(self, path):
-        self.path = Path(path)
+    def __init__(self, outputdir,particle):
+        self.particle =particle
+        sha = hashlib.sha256()
+        sha.update(str(id(particle)).encode())
+        particle_hex = sha.hexdigest()[:4]
+        name = "particle_" + particle_hex + ".pdb"
+        self.outputdir = Path(outputdir)
+        self.path = Path(self.outputdir,name)
         self.com_path = Path(self.path.parent,self.path.stem+".com")
+        print("Writing pdb file to:",self.path.as_posix())
+        print("Writing Chimera com file to:",self.com_path.as_posix())
 
-    def write_particle(self, particle):
-
+    def write_particle(self):
+        particle = self.particle
         try:
             os.remove(self.path)
             os.remove(self.com_path)

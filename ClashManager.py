@@ -6,21 +6,23 @@ from Vertex import Vertex
 from Edge import Edge
 
 
+
 class ClashManager:
-    def __init__(self,particle,new_vertex):
+    def __init__(self,particle,new_vertex,merge_distribution):
         self.particle = particle
         self.new_vertex = new_vertex
-        self.clash_tolerance_top_top = 150
-        self.clash_tolerance_top_vertex = 70
-        self.clash_tolerance_vertex = 70
-        self.merge_tolerance = 5
+        self.clash_tolerance_top_top = particle.options["clash_tolerance_top_top"]
+        self.clash_tolerance_top_vertex = particle.options["clash_tolerance_top_vertex"]
+        self.clash_tolerance_vertex = particle.options["clash_tolerance_vertex"]
+        # initialize the merge tolerance distribution
+        self.merge_distribution = merge_distribution
+
+    @property
+    def merge_tolerance(self):
+        return np.random.choice(self.merge_distribution)
 
 
 
-
-
-    def analyze(self): # returns True if clashing, False if no clash
-        pass
 
     def check_clash_vertex(self, candidate_vertex,
                            adding_edge):  # return Bool,Bool,object for Clash, Merge, Merge Vertex
@@ -56,13 +58,13 @@ class ClashManager:
             #     rejection = Rejection("vertex clash with edge")
             #     clash_flag = True
             if (tolm < dist5 <= tolv):
-                rejection = Rejection("vertex clash with vertex, dist:" + str(dist5))
+                rejection = Rejection(self.particle.timestep,1,clash_dist=dist5,clash_partner=v1)
                 clash_flag = True
             elif (tolm < dist6 <= tolv):
-                rejection = Rejection("vertex clash with vertex, dist:" + str(dist6))
+                rejection = Rejection(self.particle.timestep,1,clash_dist=dist6,clash_partner=v2)
                 clash_flag = True
             elif (tolm < dist7 <= tolv):
-                rejection = Rejection("vertex clash with vertex, dist:" + str(dist7))
+                rejection = Rejection(self.particle.timestep,1,clash_dist=dist6,clash_partner=v3)
                 clash_flag = True
 
             if (dist5 <= tolm) and (clash_flag == False):  # check for merges
@@ -129,7 +131,7 @@ class ClashManager:
                     top_clash_flag = True
 
         if top_clash_flag is True:
-            rejection = Rejection("top clash")
+            rejection = Rejection(self.particle.timestep,3)
 
         return top_clash_flag, rejection
 

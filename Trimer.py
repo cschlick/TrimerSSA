@@ -32,7 +32,6 @@ class Trimer:
         self.coord = self.__generate_coord()
         self.tops = None
         self.deleted = False
-        self.sites = set() # set of sets, associating each vertex with a site
 
 
     @property
@@ -104,7 +103,7 @@ class Trimer:
             top2 = Top(self.coord - d * unit_vector(vec))
             top1.trimer = self
             top2.trimer = self
-            tops = set([top1,top2])
+            tops = {top1,top2}
         else:
             assert(len(tops)==2)
         self.__tops = tops
@@ -135,23 +134,33 @@ class Trimer:
     def opposite_vertex(self, edge):  # returns the vertex opposite a given edge
         return next(iter(self.verteces - edge.verteces))
 
-    def add(self, particle, template,adding_edge):  # returns a candidate new vertex coord
-        #print("Adding trimer template type:",template.template_type)
-        angle = template.angle
-        stem_length = template.stem_length
+
+    def get_new_point(self,reference_point,start_point,angle,axis):  # where angle is radians of the stem length (edge to opposite vertex)
+
+        M = rotation_matrix(angle, axis)
+        new_point = np.dot(start_point, M[:3, :3].T)
+        return new_point+reference_point
+
+    def add(self, particle, template,adding_edge,debug=False):  # returns a candidate new vertex coord
+        #     V4,V5,V6,V7
+        #
+        #          V1-------V3
+        #         /  \     /
+        #       /     \  /
+        #      V5------V2
+        #
+        # E1 is midpoint of V1,V2 (the adding edge)
+        # V3 is the vertex opposite the adding edge
+        # V5 is the new vertex we need to calculate
+        #
+        #V4 will be an intermediate point along the axis E1-V3 which is the appropriate stem length for the template
+        #    (essentially making the E1V3 distance longer or shorter)
+        #
+        # The convention I used is upper case V is the Vertex object. Lower case v is the actual coordinate (a numpy vector)
+
+
 
         assert (self.full == False)
-        # edge = adding_edge
-        # opposite_vertex = self.opposite_vertex(edge)
-        # v1 = edge.vertex1.coord
-        # v2 = edge.vertex2.coord
-        # v3 = opposite_vertex.coord
-        # v4 = self.coord
-        # a = edge.coord
-        #
-
-        #print("adding template type:",template.template_type)
-
 
         E1 = adding_edge
         (V1, V2) = adding_edge.verteces
@@ -159,246 +168,56 @@ class Trimer:
 
         # # maybe extend length a bit along the V1V3 vector to get the appropriate stem length for the template
 
-        vec = E1.coord-V3.coord
-
+        E1V3 = E1.coord-V3.coord
         V1V3_dist = np.linalg.norm(V3.coord - E1.coord)
-        #print(V1V3_dist)
+        d = template.stem_length/V1V3_dist
 
-        d = stem_length/V1V3_dist # this does not extend
+        v4_1 = E1.coord - d * E1V3
+        v4_2 = E1.coord + d * E1V3
+        dist1 = np.linalg.norm(v4_1-V3.coord)
+        dist2 = np.linalg.norm(v4_2-V3.coord)
 
-        #print(V1V3_dist,stem_length,d)
-        extended_point1 = E1.coord - d * vec
-        extended_point2 = E1.coord + d * vec
-        dist1 = np.linalg.norm(extended_point1-V3.coord)
-        dist2 = np.linalg.norm(extended_point2-V3.coord)
-        if dist1<dist2:
-            extended_point = extended_point1
+        if dist1<dist2: # pick the value closer to V3 to become V4
+            v4 = v4_1
         else:
-            extended_point = extended_point2
+            v4 = v4_2
 
-        # set origin to E1
+        # set origin of rotation to E1
         e1 = E1.coord
-        v1 = V1.coord-e1
-        v2 = V1.coord-e1
-        v3 = V3.coord-e1
-        extended_point = extended_point-e1
+        v4 = v4-e1
 
-
-
-
-        #########
-        def get_new_point(reference_point,start_point,angle,axis):  # where angle is radians of the stem length (edge to opposite vertex)
-
-            M = rotation_matrix(angle, axis)
-            new_point = np.dot(start_point, M[:3, :3].T)
-            return new_point+reference_point
 
         # get two new points with consistent angle for first rotation
         axis = V1.coord-V2.coord
-
         axis = unit_vector(axis)
+        a1 = template.angle_radians
+        a2 = -1*(template.angle_radians)
+        v5_1 =self.get_new_point(e1,v4,a1,axis)
+        v5_2 =self.get_new_point(e1,v4,a2, axis)
 
+        if debug is True: # add debug verteces for the chosen verteces
+            dbgv1 = Vertex(v5_1)
+            particle.debug_verteces.add(dbgv1)
+            dbgv2 = Vertex(v5_2)
+            particle.debug_verteces.add(dbgv2)
+            dbgv3 = Vertex(E1.coord)
+            particle.debug_verteces.add(dbgv3)
 
-
-        p1 =get_new_point(e1,extended_point,angle,axis)
-        p2 = get_new_point(e1, extended_point,-1*angle, axis)
-        #debug
-        # dbgv1 = Vertex(p1)
-        # dbgv2 = Vertex(p2)
-        # particle.debug_verteces.add(dbgv1)
-        # particle.debug_verteces.add(dbgv2)
 
         # pick closest to centroid
-        if np.linalg.norm(p1 - particle.centroid) < np.linalg.norm(p2 - particle.centroid):
-            new_point = p1
+        if np.linalg.norm(v5_1 - particle.centroid) < np.linalg.norm(v5_2 - particle.centroid):
+            new_point = v5_1
 
         else:
-            new_point = p2
+            new_point = v5_2
 
+        new_vertex = Vertex(new_point) # the final V5
 
-        new_vertex = Vertex(new_point)
-
-        return new_vertex # returns the adding_edge, new_vertex
-
-    def add2(self, particle, template,adding_edge):  # returns a candidate new vertex coord
-        angle1 = template.angle1
-        angle2 = template.angle2
-        stem_length = template.stem_length
-
-        assert (self.full == False)
+        return new_vertex
 
 
 
-    #     V4,V5,V6,V7
-    #
-    #          V1-------V3
-    #         /  \     /
-    #       /     \  /
-    #      V7------V2
-    #
-    # E1 is midpoint of V1,V2 (the adding edge)
-    # V4 is the first point on the way to the final point (V7). V4 is 1 stem_length above E1, 90 degrees from the Plan(V1,V2,V3)
-    # V5 will be an intermeidate point after the first rotation
-    # A 90 degree rotation of V5 each way will give V6, a test point to see which direction to rotate
-    # A final rotation of V5 will yield V7
-
-        E1 = adding_edge
-        (V1,V2) = adding_edge.verteces
-        V3 = self.opposite_vertex(adding_edge)
-
-        # debug
-        V1.atom_name = "Be"
-        V2.atom_name = "Ba"
-        V3.atom_name = "Ca"
-        adding_edge.atom_name = "Na"
-
-
-        vec_V2V3 = V2.coord - V3.coord
-        vec_V2V1 = V2.coord - V1.coord
-        vec_normal = np.cross(vec_V2V1,vec_V2V3)
-
-        V4_1 = E1.coord + (stem_length * unit_vector(vec_normal))
-        V4_2 = E1.coord - (stem_length * unit_vector(vec_normal))
-
-        dbgv = Vertex(V4_1)
-        dbgv.atom_name = "S"
-        particle.debug_verteces.add(dbgv)
-        dbgv = Vertex(V4_2)
-        dbgv.atom_name = "O"
-        particle.debug_verteces.add(dbgv)
-
-
-
-        dist1 = np.linalg.norm(V4_1-particle.centroid)
-        dist2 = np.linalg.norm(V4_2-particle.centroid)
-        if (dist1>=dist2): # take the value further from centroid
-            V4 = V4_1
-            print("chose V4_1")
-        else:
-            V4 = V4_2
-            print("chose V4_2")
-
-
-
-        # set origin to E1
-        e1 = E1.coord
-        v1 = V1.coord-e1
-        v2 = V2.coord-e1
-        v3 = V3.coord-e1
-        v4 = V4-e1
-
-
-        #########
-        def get_new_point(reference_point,start_point,angle,axis):  # where angle is radians of the stem length (edge to opposite vertex)
-
-            M = rotation_matrix(angle, axis)
-            new_point = np.dot(start_point, M[:3, :3].T)
-            return new_point+reference_point
-
-        # get two new points with consistent angle for first rotation
-        axis = E1.coord-V3.coord
-
-        axis = unit_vector(axis)
-
-
-        V5_1 = get_new_point(e1,v4,angle1,axis)
-        V5_2 = get_new_point(e1, v4, (2*np.pi)-angle1, axis)
-
-        dbgv = Vertex(V5_1)
-        dbgv.atom_name = "Mg"
-        particle.debug_verteces.add(dbgv)
-        dbgv = Vertex(V5_2)
-        dbgv.atom_name = "Al"
-        particle.debug_verteces.add(dbgv)
-
-
-        #perform a test rotation of V5 to get V6 and determine where to rotate towards for V7
-        axis = V2.coord - V1.coord
-        V5 = V5_1 # chooseing V5_1
-        v5 = V5-e1 # at some point will need to choose which V5 to use. (random choice?)
-
-
-
-
-        a1 = (0.5) * np.pi
-        a2 = (-0.5) * np.pi
-
-
-        V6_1 = get_new_point(e1,v5,a1,axis)
-        V6_2 = get_new_point(e1, v5, a2, axis)
-
-        dbgv = Vertex(V6_1)
-        dbgv.atom_name = "Cl"
-        particle.debug_verteces.add(dbgv)
-        dbgv = Vertex(V6_2)
-        dbgv.atom_name = "Na"
-        particle.debug_verteces.add(dbgv)
-
-        dist1 = np.linalg.norm(V6_1-V3.coord)
-        dist2 = np.linalg.norm(V6_2-V3.coord)
-        print(dist1,dist2)
-        if dist1>dist2:
-            V6 = V6_1
-            print("chose V6_1")
-            sign = 1
-        else:
-            V6 = V6_2
-            print("chose V6_2")
-            sign = -1
-
-        # make final rotation of V5 to V7
-        a1 = (0.5 + (sign*angle2)) * np.pi
-        a2 = (1 + (sign*angle2)) * np.pi
-
-        V7_1 = get_new_point(e1, v5, a1, axis)
-        V7_2 = get_new_point(e1, v5, a2, axis)
-
-        dist1 = np.linalg.norm(V6-V7_1)
-        dist2 = np.linalg.norm(V6-V7_2)
-
-        if dist1 < dist2:
-            V7 = V7_1
-        else:
-            V7 = V7_2
-
-        dbgv = Vertex(V7_1)
-        dbgv.atom_name = "Mn"
-        particle.debug_verteces.add(dbgv)
-        dbgv = Vertex(V7_2)
-        dbgv.atom_name = "Li"
-        particle.debug_verteces.add(dbgv)
-
-
-        new_vertex = Vertex(V7)
-
-        return new_vertex  # returns the adding_edge, new_vertex
-
-
-
-
-    def add3(self,particle, template,adding_edge):
-        (v1,v2) = adding_edge.verteces
-        e1 = adding_edge
-        V3 = self.opposite_vertex(adding_edge)
-        p1 = v1.coord
-        r1 = template.v1_edge_length
-        p2 = v2.coord
-        r2 = template.v2_edge_length
-        p3 = V3.coord
-        r3 = template.v3_edge_length
-        centroid = particle.centroid
-        new_vertex_coord = self.trilaterate3D(p1, r1, p2, r2, p3, r3, centroid)
-        if new_vertex_coord is not None:
-            new_vertex = Vertex(new_vertex_coord)
-            return new_vertex
-        else:
-            return False
-
-
-
-
-
-    def trilaterate3D(self, p1, r1, p2, r2, p3, r3, centroid):
+    def trilaterate3D(self, p1, r1, p2, r2, p3, r3, centroid): # not currently used
 
         e_x = (p2 - p1) / np.linalg.norm(p2 - p1)
 

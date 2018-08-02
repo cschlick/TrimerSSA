@@ -1,5 +1,5 @@
 from lib import assertlength
-
+import numpy as np
 
 
 class Edge:
@@ -13,6 +13,7 @@ class Edge:
         self.trimers = set()
         self.deleted = False
         self.__atom_name = None
+        self.length = np.linalg.norm(self.vertex1.coord-self.vertex2.coord)
 
     @property
     def atom_name(self):

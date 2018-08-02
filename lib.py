@@ -1,4 +1,9 @@
-def assertlength(inputset, expectedlength):
+def assertlength(inputset, expectedlength,particle=None):
     message = "Assertion Length Error, expected: " + str(expectedlength) + " actual:" + str(len(inputset))
-    #print(message)
-    assert (len(inputset) == expectedlength)
+    try:
+        assert (len(inputset) == expectedlength)
+    except:
+        print(message)
+        if particle is not None:
+            particle.summarize()
+        assert (len(inputset) == expectedlength)

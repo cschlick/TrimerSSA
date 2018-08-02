@@ -1,18 +1,19 @@
 import numpy as np
 from Trimer import Trimer
 import random
-
 from Edge import Edge
 from Vertex import Vertex
 from Writer import Writer
 from Top import Top
 from Rejection import Rejection
+from Acceptance import Acceptance
 from ClashManager import ClashManager
 from lib import assertlength
 from transformations import unit_vector
+import scipy.stats as stats
 
 class Particle:
-    def __init__(self, seed_trimer,trimer_generator):
+    def __init__(self, seed_trimer,trimer_generator,options):
         """
         Particles mostly contain a set of trimers
         """
@@ -26,26 +27,29 @@ class Particle:
         self.rejections = []  # list of rejection objects (hold reasons for rejection)
 
         self.debug_verteces = set()
-        self.centroid = np.array([0, 0, 0])  # always has intid 0
 
         self.curvature_history = []
         # self.stem_length = np.sqrt((self.edge_length ** 2) - ((self.edge_length / 2) ** 2))
         # self.curvaturefunc = curvaturefunc  # in radians of
 
-        self.history = []
-
+        self.timesteps = [] # a history of timestep objects
+        self.options = options
         self.trimer_generator = trimer_generator
-        self.__timestep = 1
-        self.add_events = 1
-        self.remove_events_single_bond=0
-        self.remove_events_double_bond=0
+        self._timestep = 0
+        self.centroid_update_interval = options["centroid_update_interval"]
+        self.centroid_last_update = 0 # timestep of the last time the centroid was updated
+        self.centroid_initial = None # set when seeding
+
+        # initialize another gamma distribution to decide whether to merge
+        alpha, loc, beta, N = 1, 2, options["merge_tolerance_beta"], 10000
+        self.merge_distribution = stats.gamma.rvs(alpha, loc=loc, scale=beta, size=N)
 
 
 
 
     @property
     def timestep(self):
-        return self.__timestep
+        return self._timestep
 
 
     @property
@@ -107,15 +111,38 @@ class Particle:
         return self.edges | self.verteces | self.debug_verteces
 
 
+    @property
+    def centroid(self):
+        timediff = self.timestep - self.centroid_last_update
+        if timediff >= self.centroid_update_interval:
+            self._centroid = self.update_centroid()
+        return self._centroid
+
+
+    @centroid.setter
+    def centroid(self,value):
+        if self.centroid_initial is None:
+            self.centroid_initial = value
+            self._centroid = value
+
+
+    def update_centroid(self):
+        coords = [trimer.coord for trimer in self.trimers]
+        coord_sum = np.array([0.,0.,0.,])
+        for coord in coords:
+            coord_sum+=coord
+        coord_avg = coord_sum/len(coords)
+        return coord_avg
+
     def increment_timestep(self):
-        self.history.append(len(self.trimers))
+
         # check for single subunit discontinuity
         if len(self.trimers) > len(self.open_trimers):
             remove_set = {trimer for trimer in self.trimers if len(trimer.open_edges)==3}
             for trimer in remove_set:
                 self.trimers.remove(trimer)
 
-        self.__timestep+=1
+        self._timestep+=1
 
 
 
@@ -129,8 +156,6 @@ class Particle:
 
 
 
-
-
     def merge(self,adding_edge,merging_vertex):
 
             # find hinge vertex...
@@ -141,7 +166,7 @@ class Particle:
             if len(hinge_vertex_options_set) == 0:
                 #print("probably a tip-tip merge, rejecting...")
                 # for now, reject tip tip merges
-                return Rejection("tip tip merge")
+                return Rejection(self.timestep,rejection_type=4) # tip tip merge
 
             elif len(hinge_vertex_options_set) > 1: # probably closing a hole. Need to merge two edges
                     #print("merging two edges, probably closing hole.")
@@ -188,7 +213,7 @@ class Particle:
             else:
                 print("Error: Unhandled number of hinge verteces")
 
-                return Rejection("Error: Unhandled number of hinge verteces")
+                return Rejection(self.timestep,rejection_type=5)
 
     def add_type_merge_one_edge(self,
                                 adding_edge,
@@ -225,15 +250,10 @@ class Particle:
         return new_trimer
 
 
-    def add(self,specific_edge=False,trimer_type_request=None):
-
-        self.add_events+=1
+    def add(self,specific_edge=False,trimer_type_request=None,debug=False):
         rejection = None
-
-
-
-
-
+        clash_flag = False
+        merge_flag = False
         # get a random trimer to add to
         if specific_edge is False:
             adding_trimer = random.choice(self.open_trimers)
@@ -248,17 +268,25 @@ class Particle:
 
         # ask the trimer for a candidate trimer
 
-        template = self.trimer_generator.choose(trimer_type_request=trimer_type_request)
+        template = self.trimer_generator.choose(adding_edge,trimer_type_request=trimer_type_request)
 
-        new_vertex = adding_trimer.add(self, template, adding_edge=adding_edge)
-        clashmanager = ClashManager(self,new_vertex)
-        clash_flag, merge_flag, merging_vertex, rejection = clashmanager.check_clash_vertex(new_vertex,adding_edge)
+        if template is not None: # probably too long of an adding edge
+
+            if debug is True:
+                print("Trying to add trimer with template type:",template.template_type)
+
+            new_vertex = adding_trimer.add(self, template, adding_edge=adding_edge,debug=debug)
+            clashmanager = ClashManager(self,new_vertex,self.merge_distribution)
+            clash_flag, merge_flag, merging_vertex, rejection = clashmanager.check_clash_vertex(new_vertex,adding_edge)
 
 
-        # check for clashes with tops
-        if clash_flag is False:
-            clash_flag, rejection = clashmanager.check_clash_tops(adding_edge,new_vertex)
-
+            # check for clashes with tops
+            if clash_flag is False:
+                clash_flag, rejection = clashmanager.check_clash_tops(adding_edge,new_vertex)
+        else:
+            clash_flag = True
+            merge_flag = False
+            rejection = Rejection(self.timestep,8,text=str(adding_edge.length))
 
         if (merge_flag == False) and (clash_flag == False): # adding without merge
 
@@ -270,11 +298,13 @@ class Particle:
 
             self.trimers.add(new_trimer)
             adding_edge.full = True
+            acceptance = Acceptance(self.timestep, add=True, template_type=template.template_type,merging=False)
+            return acceptance
 
 
         elif (merge_flag == True) and (clash_flag == False):  # adding with merge
             # check for self merge
-            assert (len(adding_edge.trimers) == 1)
+            assertlength(adding_edge.trimers,1,particle=self)
             adding_trimer = next(iter(adding_edge.trimers))
 
 
@@ -284,12 +314,15 @@ class Particle:
                     rejection = new_trimer
                 elif type(new_trimer) is Trimer:
                     self.trimers.add(new_trimer)
+                    acceptance = Acceptance(self.timestep,add=True,template_type=template.template_type,merging=True)
+                    return acceptance
             else:
-                rejection = Rejection("self clash")
+                rejection = Rejection(self.timestep,rejection_type=6)
 
         elif (clash_flag == True):
             # the timestep resulted in rejection
-            self.rejections.append(rejection)
+            return rejection
+
 
         else:
             print("big problem..."," Merge flag:",merge_flag," Clash flag:",clash_flag)
@@ -298,29 +331,58 @@ class Particle:
     def remove(self,trimer):
         open_edges = trimer.open_edges
         if len(open_edges) == 1:
-            self.remove_events_double_bond +=1
+            self.trimers.remove(trimer)
+            trimer.delete()
+            acceptance = Acceptance(self.timestep,remove=True)
+            return acceptance
         elif len(open_edges) == 2:
-            self.remove_events_single_bond+=1
+            self.trimers.remove(trimer)
+            trimer.delete()
+            acceptance = Acceptance(self.timestep, remove=True)
+            return acceptance
         else:
-            print("error, number of open eges in trimer is not 1 or 2")
+            rejection = Rejection(self.timestep,7)
+            return rejection
 
-
-        self.trimers.remove(trimer)
-        trimer.delete()
-
+    def write(self,outputdir,summarize=False):
+        if summarize is False:
+            self.summarize()
+        writer = Writer(outputdir, self)
+        writer.write_particle()
 
 
 
     def summarize(self):
+        ####### Rejections #######
+        add_outcomes = [timestep.add for timestep in self.timesteps]
+        add_rejections = [outcome for outcome in add_outcomes if type(outcome) is Rejection]
+        # rejection histogram
+        rejection_hist = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0,8:0}
+        for rejection in add_rejections:
+            rejection_hist[rejection.rejection_type] += 1
+
         print("Particle Summary:")
-        print("\tTimesteps: ",self.timestep)
-        print("\tAdd events: ",self.add_events)
-        print("\tRemove events single bonded:",self.remove_events_single_bond)
-        print("\tRemove events double bonded:", self.remove_events_double_bond)
+        print("\tCurrent timestep: ",self.timestep)
+        print("\tNumber of timestep objects: ", len(self.timesteps))
+        print("\tAdd attempts: ",len([timestep for timestep in self.timesteps if timestep.tried_to_add is True]))
+        print("\tAdd successes: ",len([timestep for timestep in self.timesteps if (timestep.tried_to_add is True) and type(timestep.add) is Acceptance]))
+
+        print("\tRemove single bonded attempts:",len([timestep for timestep in self.timesteps if timestep.tried_to_remove_single is True]))
+        print("\tRemove single bonded successes: ",len([timestep for timestep in self.timesteps if (timestep.tried_to_remove_single is True) and type(timestep.remove_single) is Acceptance]))
+
+        print("\tRemove double bonded attempts:", len([timestep for timestep in self.timesteps if timestep.tried_to_remove_double is True]))
+        print("\tRemove double bonded successes: ",len([timestep for timestep in self.timesteps if (timestep.tried_to_remove_double is True) and type(timestep.remove_double) is Acceptance]))
+
+
         print("\tTrimers: ", len(self.trimers))
         print("\tEdges: ", len(self.edges))
         print("\tVerteces: ", len(self.verteces))
         print("\tDebug Verteces: ", len(self.debug_verteces))
         print("\tOpen trimers: ", len(self.open_trimers))
         print("\tOpen edges: ", len(self.open_edges))
-        print("\tRejections: ", len(self.rejections))
+        print("\tAdd Rejection histogram: ")
+        for key,value in rejection_hist.items():
+            rejection_mapper = add_rejections[0].rejection_types
+            print("\t\t",str(value).rjust(10),":",rejection_mapper[key])
+
+        print("\n\n")
